@@ -124,6 +124,10 @@ with st.sidebar:
         "Regularização das forças", 0.0, 2.0, 0.25, 0.05,
         help="Estabiliza estimativas nas primeiras rodadas; valores altos aproximam as forças.",
     )
+    home_regularization = st.slider(
+        "Regularização do mando por clube", 0.0, 5.0, 1.0, 0.1,
+        help="Encolhe os desvios de mando dos clubes em direção ao mando médio e reduz sobreajuste.",
+    )
     seed = st.number_input("Semente aleatória", min_value=0, max_value=2_147_483_647, value=1970)
 
 observed, remaining = split_at_matchday(matches, cutoff)
@@ -133,7 +137,12 @@ if observed.empty:
     st.warning("Nenhum jogo encerrado até o corte. As forças começam iguais e a incerteza estrutural é máxima.")
 
 with st.spinner("Ajustando o modelo e simulando a temporada…"):
-    model = fit_davidson(observed, teams["team_id"].astype(str).tolist(), float(regularization))
+    model = fit_davidson(
+        observed,
+        teams["team_id"].astype(str).tolist(),
+        regularization=float(regularization),
+        home_regularization=float(home_regularization),
+    )
     simulation = simulate_season(
         observed=observed,
         remaining=remaining,
@@ -227,16 +236,30 @@ with tab_table:
 with tab_model:
     st.subheader("Especificação")
     st.latex(r"P(H)=\frac{a}{a+b+\nu\sqrt{ab}},\quad P(E)=\frac{\nu\sqrt{ab}}{a+b+\nu\sqrt{ab}},\quad P(A)=\frac{b}{a+b+\nu\sqrt{ab}}")
-    st.latex(r"a=\exp(\theta_H+h),\qquad b=\exp(\theta_A)")
+    st.latex(r"a=\exp(\theta_H+h+\delta_H),\qquad b=\exp(\theta_A)")
     st.write(
-        "As forças θ, o mando h e o parâmetro de empate ν são estimados por máxima verossimilhança "
-        "penalizada. A soma das forças é zero. O placar é amostrado condicionalmente ao resultado, usando "
-        "os placares observados e um prior discreto suavizador."
+        "As forças θ, o mando médio h, os desvios de mando por clube δ e o parâmetro de empate ν são "
+        "estimados por máxima verossimilhança penalizada. As somas de θ e δ são zero; δ usa regularização "
+        "própria. O placar é amostrado condicionalmente ao resultado, usando os placares observados e um "
+        "prior discreto suavizador."
     )
     st.dataframe(
         model.strength_table(teams).drop(columns="team_id").rename(
-            columns={"team": "Clube", "forca_log": "Força log", "forca_relativa": "Força relativa"}
-        ).style.format({"Força log": "{:.3f}", "Força relativa": "{:.3f}"}),
+            columns={
+                "team": "Clube",
+                "forca_log": "Força log",
+                "forca_relativa": "Força relativa",
+                "desvio_mando_log": "Desvio de mando (log)",
+                "multiplicador_mando_clube": "Mando total do clube",
+            }
+        ).style.format(
+            {
+                "Força log": "{:.3f}",
+                "Força relativa": "{:.3f}",
+                "Desvio de mando (log)": "{:+.3f}",
+                "Mando total do clube": "{:.2f}×",
+            }
+        ),
         width="stretch",
         hide_index=True,
     )

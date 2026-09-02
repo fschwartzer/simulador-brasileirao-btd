@@ -6,7 +6,7 @@ Aplicativo Streamlit que estima, rodada a rodada, a probabilidade de rebaixament
 
 - ingestão da Série A (`BSA`) pela API gratuita [football-data.org](https://www.football-data.org/coverage);
 - corte temporal por rodada, sem usar resultados posteriores no ajuste;
-- forças dos clubes, parâmetro de empate e mando estimados por máxima verossimilhança penalizada;
+- forças dos clubes, parâmetro de empate, mando médio e desvios de mando por clube estimados por máxima verossimilhança penalizada;
 - placares amostrados condicionalmente a vitória/empate/derrota, para acumular saldo e gols pró;
 - ordenação por pontos, vitórias, saldo de gols e gols pró;
 - probabilidade de rebaixamento, intervalos empíricos de pontos, histograma e boxplot em Plotly;
@@ -54,10 +54,10 @@ O upload aceita o mesmo contrato interno da API:
 
 ## Metodologia
 
-Para o mandante `H` e visitante `A`, com forças `θ`, mando `h` e parâmetro de empate positivo `ν`:
+Para o mandante `H` e visitante `A`, com forças `θ`, mando médio `h`, desvio de mando do clube `δ` e parâmetro de empate positivo `ν`:
 
 ```text
-a = exp(θ_H + h)
+a = exp(θ_H + h + δ_H)
 b = exp(θ_A)
 D = a + b + ν sqrt(a b)
 
@@ -66,7 +66,9 @@ P(empate)   = ν sqrt(a b) / D
 P(A vence) = b / D
 ```
 
-A soma das forças é fixada em zero para identificabilidade. Uma penalização L2 evita estimativas extremas em rodadas iniciais. A regularização é ajustável e deve entrar na análise de sensibilidade.
+As somas das forças `θ` e dos desvios de mando `δ` são fixadas em zero para identificabilidade. Assim, `h` representa o efeito médio de jogar em casa no campeonato e `δ_H` representa quanto o mandante se beneficia acima ou abaixo dessa média. O multiplicador total de mando do clube é `exp(h + δ_H)`.
+
+Há duas penalizações L2 ajustáveis: uma para as forças e outra, mais forte por padrão, para os desvios de mando. A segunda encolhe `δ` em direção a zero e reduz o risco de sobreajuste quando há poucos jogos em casa. As duas regularizações devem entrar na análise de sensibilidade; um desvio estimado não deve ser interpretado como efeito causal do estádio.
 
 O BTD não produz placares. Depois de sortear o resultado, o aplicativo amostra um placar compatível de uma distribuição empírica por tipo de resultado. Placares reais observados recebem peso maior; um pequeno conjunto de pseudoplacares estabiliza o começo da temporada. Essa segunda camada permite aplicar saldo e gols pró sem afirmar que o BTD seja um modelo de gols.
 
@@ -80,6 +82,7 @@ Riscos metodológicos relevantes:
 - os jogos são condicionais aos parâmetros ajustados e tratados como independentes;
 - a incerteza atual é Monte Carlo condicional; não inclui integralmente a incerteza dos parâmetros estimados;
 - em poucas rodadas, regularização e pseudoplacares têm impacto material;
+- o mando específico por clube pode refletir composição dos adversários e ruído do calendário, sobretudo com amostra pequena;
 - a disponibilidade histórica depende da conta, temporada e política da API;
 - um backtest correto deve reajustar o modelo em cada rodada, nunca reutilizar parâmetros estimados com a temporada completa.
 
@@ -89,7 +92,7 @@ Riscos metodológicos relevantes:
 python -m pytest -q
 ```
 
-Os testes cobrem soma das probabilidades, efeito do mando, restrição de identificabilidade, corte temporal, reprodutibilidade e ordenação pelos critérios simulados.
+Os testes cobrem soma das probabilidades, mando médio e específico por clube, regularização, restrições de identificabilidade, corte temporal, reprodutibilidade e ordenação pelos critérios simulados.
 
 ## Estrutura
 
