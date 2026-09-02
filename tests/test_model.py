@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from brasileirao.model import DavidsonModel, fit_davidson
+from brasileirao.model import DavidsonModel, fit_davidson, select_davidson_hyperparameters
 
 
 def test_probabilities_sum_to_one_and_home_advantage_helps_home():
@@ -83,3 +83,116 @@ def test_fit_rejects_negative_home_regularization():
 
     with np.testing.assert_raises_regex(ValueError, "home_regularization"):
         fit_davidson(empty, ["a", "b"], home_regularization=-0.1)
+
+
+def test_global_home_advantage_has_independent_regularization():
+    results = pd.DataFrame(
+        {
+            "home_id": ["a", "b"] * 10,
+            "away_id": ["b", "a"] * 10,
+            "home_goals": [1] * 20,
+            "away_goals": [0] * 20,
+        }
+    )
+
+    weak = fit_davidson(
+        results,
+        ["a", "b"],
+        regularization=1.0,
+        home_regularization=100.0,
+        home_advantage_regularization=0.0,
+    )
+    strong = fit_davidson(
+        results,
+        ["a", "b"],
+        regularization=1.0,
+        home_regularization=100.0,
+        home_advantage_regularization=100.0,
+    )
+
+    assert weak.home_advantage > 0
+    assert abs(strong.home_advantage) < abs(weak.home_advantage)
+
+
+def test_temporal_decay_gives_more_weight_to_recent_results():
+    results = pd.DataFrame(
+        {
+            "matchday": np.arange(1, 9),
+            "home_id": ["a", "b"] * 4,
+            "away_id": ["b", "a"] * 4,
+            "home_goals": [1, 0, 1, 0, 0, 1, 0, 1],
+            "away_goals": [0, 1, 0, 1, 1, 0, 1, 0],
+        }
+    )
+
+    without_decay = fit_davidson(
+        results,
+        ["a", "b"],
+        regularization=0.5,
+        home_regularization=100.0,
+        home_advantage_regularization=100.0,
+    )
+    with_decay = fit_davidson(
+        results,
+        ["a", "b"],
+        regularization=0.5,
+        home_regularization=100.0,
+        home_advantage_regularization=100.0,
+        decay_half_life=1.0,
+        reference_matchday=8,
+    )
+
+    assert np.isclose(without_decay.strengths[0], without_decay.strengths[1], atol=1e-4)
+    assert with_decay.strengths[1] > with_decay.strengths[0]
+
+
+def test_decay_requires_matchday_and_valid_reference():
+    results = pd.DataFrame(
+        {"home_id": ["a"], "away_id": ["b"], "home_goals": [1], "away_goals": [0]}
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "matchday"):
+        fit_davidson(results, ["a", "b"], decay_half_life=4.0)
+
+    results["matchday"] = 2
+    with np.testing.assert_raises_regex(ValueError, "reference_matchday"):
+        fit_davidson(results, ["a", "b"], decay_half_life=4.0, reference_matchday=1)
+
+
+def test_temporal_backtest_returns_ranked_auditable_selection():
+    rows = []
+    teams = ["a", "b", "c"]
+    for matchday in range(1, 7):
+        fixtures = [("a", "b"), ("b", "c"), ("c", "a")]
+        for home_id, away_id in fixtures:
+            home_wins = (matchday + teams.index(home_id)) % 2 == 0
+            rows.append(
+                {
+                    "matchday": matchday,
+                    "home_id": home_id,
+                    "away_id": away_id,
+                    "home_goals": int(home_wins),
+                    "away_goals": int(not home_wins),
+                }
+            )
+    results = pd.DataFrame(rows)
+
+    selection = select_davidson_hyperparameters(
+        results,
+        teams,
+        regularizations=(0.25, 2.0),
+        home_advantage_regularizations=(0.25,),
+        home_regularizations=(2.0,),
+        decay_half_lives=(2.0, 6.0, None),
+        min_training_matchdays=3,
+        max_validation_matchdays=2,
+    )
+
+    assert selection.validation_matchdays == (5, 6)
+    assert selection.n_validation_matches == 6
+    assert selection.regularization in {0.25, 2.0}
+    assert selection.decay_half_life in {2.0, 6.0, None}
+    assert selection.scores["log_loss"].is_monotonic_increasing
+    assert {"log_loss", "brier_score", "log_loss_se", "convergence_rate"}.issubset(
+        selection.scores.columns
+    )

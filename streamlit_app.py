@@ -9,7 +9,7 @@ import streamlit as st
 
 from brasileirao.api import FootballDataError, fetch_brasileirao_matches, parse_uploaded_csv
 from brasileirao.data import make_demo_matches, split_at_matchday, standings_from_results, team_catalog
-from brasileirao.model import fit_davidson
+from brasileirao.model import fit_davidson, select_davidson_hyperparameters
 from brasileirao.simulation import simulate_season
 
 
@@ -24,6 +24,11 @@ def load_api_data(token: str, season: int) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_demo_data() -> pd.DataFrame:
     return make_demo_matches()
+
+
+@st.cache_data(show_spinner=False)
+def tune_model_parameters(completed: pd.DataFrame, team_ids: tuple[str, ...]):
+    return select_davidson_hyperparameters(completed, team_ids)
 
 
 def configured_token() -> str:
@@ -120,14 +125,41 @@ with st.sidebar:
     relegated_slots = st.number_input(
         "Vagas de rebaixamento", min_value=1, max_value=max(1, len(teams) - 1), value=min(4, len(teams) - 1)
     )
-    regularization = st.slider(
-        "Regularização das forças", 0.0, 2.0, 0.25, 0.05,
-        help="Estabiliza estimativas nas primeiras rodadas; valores altos aproximam as forças.",
+    automatic_tuning = st.checkbox(
+        "Selecionar parâmetros por backtest temporal",
+        value=True,
+        help="Treina somente em rodadas anteriores e escolhe a configuração com menor log loss.",
     )
-    home_regularization = st.slider(
-        "Regularização do mando por clube", 0.0, 5.0, 1.0, 0.1,
-        help="Encolhe os desvios de mando dos clubes em direção ao mando médio e reduz sobreajuste.",
-    )
+    regularization = 5.0
+    home_advantage_regularization = 5.0
+    home_regularization = 200.0
+    decay_half_life = None
+    if not automatic_tuning:
+        regularization = st.slider(
+            "Regularização das forças", 0.0, 10.0, 5.0, 0.25,
+            help="Estabiliza estimativas; valores altos aproximam as forças dos clubes.",
+        )
+        home_advantage_regularization = st.slider(
+            "Regularização do mando médio", 0.0, 20.0, 5.0, 0.25,
+            help="Controla separadamente o efeito médio de jogar em casa no campeonato.",
+        )
+        home_regularization = float(
+            st.select_slider(
+                "Regularização do mando por clube",
+                options=[0, 1, 5, 10, 20, 50, 100, 200],
+                value=50,
+                help="Encolhe os desvios de mando dos clubes em direção ao mando médio.",
+            )
+        )
+        decay_half_life = st.selectbox(
+            "Decaimento temporal",
+            options=[None, 4.0, 6.0, 8.0, 12.0, 20.0, 38.0],
+            index=0,
+            format_func=lambda value: (
+                "Sem decaimento" if value is None else f"Meia-vida de {value:g} rodadas"
+            ),
+            help="Após a meia-vida escolhida, o peso de um jogo cai pela metade.",
+        )
     seed = st.number_input("Semente aleatória", min_value=0, max_value=2_147_483_647, value=1970)
 
 observed, remaining = split_at_matchday(matches, cutoff)
@@ -136,12 +168,44 @@ if is_demo:
 if observed.empty:
     st.warning("Nenhum jogo encerrado até o corte. As forças começam iguais e a incerteza estrutural é máxima.")
 
+backtest_result = None
+observed_matchdays = observed["matchday"].dropna().astype(int).nunique()
+if automatic_tuning and not observed.empty and observed_matchdays >= 12:
+    with st.spinner("Selecionando decaimento e regularizações por backtest temporal…"):
+        try:
+            backtest_result = tune_model_parameters(
+                observed,
+                tuple(teams["team_id"].astype(str).tolist()),
+            )
+        except ValueError as exc:
+            st.warning(f"Backtest indisponível ({exc}). Usando parâmetros conservadores padrão.")
+    if backtest_result is not None:
+        regularization = backtest_result.regularization
+        home_advantage_regularization = backtest_result.home_advantage_regularization
+        home_regularization = backtest_result.home_regularization
+        decay_half_life = backtest_result.decay_half_life
+        decay_description = (
+            "sem decaimento" if decay_half_life is None else f"meia-vida {decay_half_life:g} rodadas"
+        )
+        st.sidebar.caption(
+            f"Selecionados: forças {regularization:g}; mando médio {home_advantage_regularization:g}; "
+            f"mando por clube {home_regularization:g}; {decay_description}."
+        )
+elif automatic_tuning and not observed.empty:
+    st.warning(
+        "Ainda há poucas rodadas para um backtest temporal estável. "
+        "Foram usados os parâmetros conservadores padrão."
+    )
+
 with st.spinner("Ajustando o modelo e simulando a temporada…"):
     model = fit_davidson(
         observed,
         teams["team_id"].astype(str).tolist(),
         regularization=float(regularization),
         home_regularization=float(home_regularization),
+        home_advantage_regularization=float(home_advantage_regularization),
+        decay_half_life=None if decay_half_life is None else float(decay_half_life),
+        reference_matchday=int(cutoff),
     )
     simulation = simulate_season(
         observed=observed,
@@ -237,12 +301,52 @@ with tab_model:
     st.subheader("Especificação")
     st.latex(r"P(H)=\frac{a}{a+b+\nu\sqrt{ab}},\quad P(E)=\frac{\nu\sqrt{ab}}{a+b+\nu\sqrt{ab}},\quad P(A)=\frac{b}{a+b+\nu\sqrt{ab}}")
     st.latex(r"a=\exp(\theta_H+h+\delta_H),\qquad b=\exp(\theta_A)")
+    temporal_description = (
+        "O backtest não aplicou decaimento temporal neste corte."
+        if decay_half_life is None
+        else f"O peso de um jogo cai pela metade a cada {decay_half_life:g} rodadas."
+    )
     st.write(
         "As forças θ, o mando médio h, os desvios de mando por clube δ e o parâmetro de empate ν são "
-        "estimados por máxima verossimilhança penalizada. As somas de θ e δ são zero; δ usa regularização "
-        "própria. O placar é amostrado condicionalmente ao resultado, usando os placares observados e um "
-        "prior discreto suavizador."
+        "estimados por máxima verossimilhança penalizada e ponderada no tempo. As somas de θ e δ são zero; "
+        f"forças, mando médio e mando por clube usam regularizações independentes. {temporal_description}"
     )
+    if backtest_result is not None:
+        st.subheader("Seleção temporal dos parâmetros")
+        st.write(
+            f"A configuração foi escolhida em {len(backtest_result.validation_matchdays)} folds expansivos "
+            f"(rodadas {backtest_result.validation_matchdays[0]}–{backtest_result.validation_matchdays[-1]}), "
+            f"com {backtest_result.n_validation_matches} partidas de validação. Nenhum fold usa resultados "
+            "da própria rodada prevista ou de rodadas posteriores."
+        )
+        backtest_table = backtest_result.scores.head(10).rename(
+            columns={
+                "regularization": "Reg. forças",
+                "home_advantage_regularization": "Reg. mando médio",
+                "home_regularization": "Reg. mando clube",
+                "decay_half_life": "Meia-vida",
+                "log_loss": "Log loss",
+                "brier_score": "Brier",
+                "log_loss_se": "EP log loss",
+                "convergence_rate": "Convergência",
+                "n_matches": "Jogos",
+            }
+        )
+        backtest_table["Meia-vida"] = backtest_table["Meia-vida"].map(
+            lambda value: "Sem decaimento" if pd.isna(value) else f"{value:g}"
+        )
+        st.dataframe(
+            backtest_table.style.format(
+                {
+                    "Log loss": "{:.4f}",
+                    "Brier": "{:.4f}",
+                    "EP log loss": "{:.4f}",
+                    "Convergência": "{:.0%}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
     st.dataframe(
         model.strength_table(teams).drop(columns="team_id").rename(
             columns={
@@ -264,7 +368,8 @@ with tab_model:
         hide_index=True,
     )
     st.caption(
-        "A força é associativa, não causal. Lesões, escalações, calendário, trocas de técnico e dependência temporal não entram neste MVP."
+        "A força é associativa, não causal. O decaimento captura mudança recente apenas pelos resultados; "
+        "lesões, escalações, calendário de outras competições e trocas de técnico não entram no modelo."
     )
 
 with tab_data:
