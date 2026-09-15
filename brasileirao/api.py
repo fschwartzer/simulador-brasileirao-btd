@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime, timezone
 
 import pandas as pd
 import requests
@@ -25,7 +26,7 @@ def fetch_brasileirao_matches(token: str, season: int, timeout: float = 20.0) ->
     """Obtém a temporada completa do Brasileirão Série A no plano gratuito."""
 
     if not token or not token.strip():
-        raise FootballDataError("Informe uma chave da football-data.org.")
+        raise FootballDataError("Configure API_TOKEN nos Secrets do aplicativo.")
     try:
         response = requests.get(
             f"{BASE_URL}/competitions/BSA/matches",
@@ -34,7 +35,7 @@ def fetch_brasileirao_matches(token: str, season: int, timeout: float = 20.0) ->
             timeout=timeout,
         )
     except requests.RequestException as exc:
-        raise FootballDataError(f"Falha de rede ao consultar a API: {exc}") from exc
+        raise FootballDataError("Não foi possível conectar à API. Tente atualizar os dados novamente em instantes.") from exc
 
     if response.status_code == 401:
         raise FootballDataError("Chave inválida ou ausente (HTTP 401).")
@@ -48,8 +49,18 @@ def fetch_brasileirao_matches(token: str, season: int, timeout: float = 20.0) ->
     except (requests.RequestException, ValueError) as exc:
         raise FootballDataError(f"Resposta inválida da API (HTTP {response.status_code}).") from exc
 
+    if not isinstance(payload, dict) or not isinstance(payload.get("matches"), list):
+        raise FootballDataError("A API retornou uma resposta sem uma lista válida de partidas.")
     rows: list[dict[str, Any]] = []
-    for match in payload.get("matches", []):
+    for match in payload["matches"]:
+        if not isinstance(match, dict):
+            raise FootballDataError("A API retornou uma partida em formato inválido.")
+        for key in ("homeTeam", "awayTeam", "score"):
+            if match.get(key) is not None and not isinstance(match[key], dict):
+                raise FootballDataError("A API retornou dados de clube ou placar em formato inválido.")
+        full_time = (match.get("score") or {}).get("fullTime")
+        if full_time is not None and not isinstance(full_time, dict):
+            raise FootballDataError("A API retornou um placar em formato inválido.")
         home_goals, away_goals = _extract_goals(match)
         home = match.get("homeTeam") or {}
         away = match.get("awayTeam") or {}
@@ -69,7 +80,14 @@ def fetch_brasileirao_matches(token: str, season: int, timeout: float = 20.0) ->
         )
     if not rows:
         raise FootballDataError("A API não retornou partidas para a temporada informada.")
-    return validate_matches(pd.DataFrame(rows))
+    try:
+        matches = validate_matches(pd.DataFrame(rows))
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise FootballDataError("As partidas recebidas da API estão incompletas ou inconsistentes. Tente atualizar os dados mais tarde.") from exc
+    matches.attrs["source"] = "football-data.org"
+    matches.attrs["season"] = int(season)
+    matches.attrs["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    return matches
 
 
 def parse_uploaded_csv(file: Any) -> pd.DataFrame:

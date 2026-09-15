@@ -1,4 +1,4 @@
-# Simulador de rebaixamento do Brasileirão
+# Risco de degola
 
 Aplicativo Streamlit que estima, rodada a rodada, a probabilidade de rebaixamento dos clubes da Série A. O resultado de cada partida futura é gerado por um modelo Bradley–Terry–Davidson (BTD), com empates e vantagem do mandante; a temporada é concluída por Monte Carlo.
 
@@ -10,7 +10,9 @@ Aplicativo Streamlit que estima, rodada a rodada, a probabilidade de rebaixament
 - placares amostrados condicionalmente a vitória/empate/derrota, para acumular saldo e gols pró;
 - ordenação por pontos, vitórias, saldo de gols e gols pró;
 - probabilidade de rebaixamento, intervalos empíricos de pontos, histograma e boxplot em Plotly;
-- modo demonstrativo offline e importação/exportação CSV.
+- fonte exclusiva de partidas: API, autenticada via `API_TOKEN` nos Secrets;
+- identidade visual em azul-petróleo, mascote e cartões de risco;
+- exportação CSV dos dados da API e dos resultados do modelo.
 
 ## Executar
 
@@ -20,37 +22,26 @@ Requer Python 3.11 ou superior.
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-streamlit run app.py
+streamlit run streamlit_app.py
 ```
 
-O aplicativo abre inicialmente em **Demonstração**, com dados artificiais. Para dados reais:
+O aplicativo consulta exclusivamente a football-data.org. Não há modo demonstrativo, upload de CSV ou campo de senha na interface. Falhas da API interrompem a projeção; não existe substituição automática por dados artificiais.
 
-1. crie uma chave no [cadastro da football-data.org](https://www.football-data.org/client/register);
-2. selecione `football-data.org` na barra lateral;
-3. informe a chave e a temporada.
+No **Streamlit Community Cloud**, mantenha nos **Secrets** a configuração já utilizada:
 
-A chave também pode ser definida sem entrar no código:
-
-```powershell
-$env:FOOTBALL_DATA_TOKEN = "sua-chave"
-streamlit run app.py
+```toml
+API_TOKEN = "sua-chave"
 ```
 
-No Streamlit Community Cloud, salve a chave em `Secrets` como `FOOTBALL_DATA_TOKEN`. Nunca versione a chave.
+Selecione `streamlit_app.py` como arquivo principal. Para execução local, use `.streamlit/secrets.toml` (ignorado pelo Git) ou a variável de ambiente `API_TOKEN`. Os Secrets têm precedência. Nunca versione a chave. Consulte a [documentação de Secrets do Streamlit](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/secrets-management).
 
-## Contrato do CSV
+As consultas ficam em cache por até 15 minutos. A barra lateral mostra o horário da consulta em Brasília e oferece **Atualizar dados**. A temporada selecionada faz parte da chave de cache. O acesso a cada temporada depende da assinatura na football-data.org.
 
-O upload aceita o mesmo contrato interno da API:
+O arquivo exportado na aba **Dados da API** contém as partidas normalizadas. Os percentuais, pontos projetados e cenários são calculados pelo aplicativo; não são probabilidades fornecidas pela API. Os pseudoplacares de suavização do modelo continuam sendo hipóteses explícitas, sem serem apresentados como partidas observadas. As funções antigas de geração de fixtures e leitura de CSV permanecem disponíveis para compatibilidade e testes, sem conexão com a interface.
 
-| coluna | tipo/descrição |
-|---|---|
-| `matchday` | rodada inteira, iniciando em 1 |
-| `status` | `FINISHED`/`AWARDED` para jogo encerrado; outro status para jogo futuro |
-| `home_id`, `away_id` | identificadores estáveis dos clubes |
-| `home_team`, `away_team` | nomes dos clubes |
-| `home_goals`, `away_goals` | inteiros para jogos encerrados; vazios para futuros |
-| `utc_date` | opcional, data/hora ISO-8601 |
-| `match_id` | opcional, identificador único da partida |
+## Identidade visual
+
+O mascote em `assets/fantasminha.png` foi gerado com a ferramenta integrada de imagens, inspirado na referência fornecida pelo usuário. O prompt está em `assets/fantasminha-prompt.txt`. O tema fica em `.streamlit/config.toml` e os estilos responsivos em `assets/style.css`.
 
 ## Metodologia
 
@@ -112,7 +103,10 @@ Os testes cobrem soma das probabilidades, mando médio e específico por clube, 
 ## Estrutura
 
 ```text
-app.py                         interface Streamlit
+streamlit_app.py               interface Streamlit
+brasileirao/presentation.py    componentes visuais
+brasileirao/config.py          configuração de API_TOKEN
+assets/                        mascote e estilos
 brasileirao/api.py             cliente e normalização da API
 brasileirao/data.py            validação, corte e classificação
 brasileirao/model.py           ajuste Bradley–Terry–Davidson
