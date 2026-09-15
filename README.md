@@ -41,7 +41,7 @@ O arquivo exportado na aba **Dados da API** contém as partidas normalizadas. Os
 
 ## Identidade visual
 
-O mascote em `assets/fantasminha.png` foi gerado com a ferramenta integrada de imagens, inspirado na referência fornecida pelo usuário. O prompt está em `assets/fantasminha-prompt.txt`. O tema fica em `.streamlit/config.toml` e os estilos responsivos em `assets/style.css`.
+O mascote em `assets/fantasminha.png` foi gerado com a ferramenta de imagens. O prompt está em `assets/fantasminha-prompt.txt`. O tema fica em `.streamlit/config.toml` e os estilos responsivos em `assets/style.css`.
 
 ## Metodologia
 
