@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from brasileirao.api import FootballDataError, fetch_brasileirao_matches, parse_uploaded_csv
-from brasileirao.data import make_demo_matches, split_at_matchday, standings_from_results, team_catalog
+from brasileirao.api import FootballDataError, fetch_brasileirao_matches
+from brasileirao.config import resolve_api_token
+from brasileirao.data import split_at_matchday, standings_from_results, team_catalog
 from brasileirao.model import fit_davidson, select_davidson_hyperparameters
+from brasileirao.presentation import render_header, render_risk_cards, style_chart
 from brasileirao.simulation import simulate_season
 
 
-st.set_page_config(page_title="Risco de rebaixamento — Brasileirão", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Risco de degola", page_icon="👻", layout="wide")
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -22,21 +25,15 @@ def load_api_data(token: str, season: int) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_demo_data() -> pd.DataFrame:
-    return make_demo_matches()
-
-
-@st.cache_data(show_spinner=False)
 def tune_model_parameters(completed: pd.DataFrame, team_ids: tuple[str, ...]):
     return select_davidson_hyperparameters(completed, team_ids)
 
 
 def configured_token() -> str:
-    environment_value = os.getenv("FOOTBALL_DATA_TOKEN", "")
     try:
-        return str(st.secrets.get("FOOTBALL_DATA_TOKEN", environment_value))
+        return resolve_api_token(st.secrets, os.environ)
     except (FileNotFoundError, AttributeError):
-        return environment_value
+        return resolve_api_token({}, os.environ)
 
 
 def format_summary(summary: pd.DataFrame) -> pd.DataFrame:
@@ -59,47 +56,33 @@ def risk_background(value: float) -> str:
     return f"background-color: rgba(220, 53, 69, {alpha:.3f})"
 
 
-st.title("Risco de rebaixamento no Brasileirão")
-st.caption("Bradley–Terry–Davidson com mando de campo, placares condicionais e Monte Carlo")
+render_header()
 
 with st.sidebar:
-    st.header("Dados e simulação")
-    source = st.radio("Fonte", ["football-data.org", "CSV", "Demonstração"], index=2)
-    season = st.number_input("Temporada", min_value=2014, max_value=2100, value=2026, step=1)
-    token = ""
-    uploaded = None
-    if source == "football-data.org":
-        token = st.text_input(
-            "Chave da API",
-            value=configured_token(),
-            type="password",
-            help="Crie uma chave gratuita em football-data.org/client/register.",
-        )
-    elif source == "CSV":
-        uploaded = st.file_uploader("Partidas em CSV", type=["csv"])
+    st.header("Seu cenário")
+    st.caption("Explore o campeonato, rodada a rodada.")
+    season = st.number_input("Temporada", min_value=2014, max_value=2100, value=datetime.now().year, step=1)
+    st.caption("Fonte exclusiva: football-data.org · Série A")
+    if st.button("Atualizar dados", width="stretch"):
+        load_api_data.clear()
 
+token = configured_token()
+if not token:
+    st.error("Conexão não configurada. Defina API_TOKEN nos Secrets do Streamlit Community Cloud.")
+    st.stop()
 try:
-    if source == "football-data.org":
-        if not token:
-            st.info("Informe a chave gratuita na barra lateral ou selecione Demonstração.")
-            st.stop()
-        with st.spinner("Consultando a football-data.org…"):
-            matches = load_api_data(token, int(season))
-        is_demo = False
-    elif source == "CSV":
-        if uploaded is None:
-            st.info("Envie um CSV no contrato descrito no README.")
-            st.stop()
-        matches = parse_uploaded_csv(uploaded)
-        is_demo = False
-    else:
-        matches = load_demo_data()
-        is_demo = True
+    with st.spinner("Buscando os jogos do Brasileirão…"):
+        matches = load_api_data(token, int(season))
+    teams = team_catalog(matches)
 except (FootballDataError, ValueError) as exc:
     st.error(str(exc))
     st.stop()
 
-teams = team_catalog(matches)
+fetched_at = matches.attrs.get("fetched_at")
+if fetched_at:
+    consultation = pd.Timestamp(fetched_at).tz_convert("America/Sao_Paulo").strftime("%d/%m/%Y às %H:%M")
+    st.sidebar.caption(f"Consulta à API: {consultation} (Brasília). Cache de até 15 minutos.")
+
 all_matchdays = matches["matchday"].dropna().astype(int)
 finished_matchdays = matches.loc[matches["status"].isin(["FINISHED", "AWARDED"]), "matchday"].dropna().astype(int)
 last_finished = int(finished_matchdays.max()) if not finished_matchdays.empty else int(all_matchdays.min())
@@ -122,49 +105,48 @@ with st.sidebar:
         options=[1_000, 2_500, 5_000, 10_000, 20_000],
         value=10_000,
     )
-    relegated_slots = st.number_input(
-        "Vagas de rebaixamento", min_value=1, max_value=max(1, len(teams) - 1), value=min(4, len(teams) - 1)
-    )
-    automatic_tuning = st.checkbox(
-        "Selecionar parâmetros por backtest temporal",
-        value=True,
-        help="Treina somente em rodadas anteriores e escolhe a configuração com menor log loss.",
-    )
-    regularization = 5.0
-    home_advantage_regularization = 5.0
-    home_regularization = 200.0
-    decay_half_life = None
-    if not automatic_tuning:
-        regularization = st.slider(
-            "Regularização das forças", 0.0, 10.0, 5.0, 0.25,
-            help="Estabiliza estimativas; valores altos aproximam as forças dos clubes.",
+    with st.expander("Ajustes do modelo", expanded=False):
+        relegated_slots = st.number_input(
+            "Vagas de rebaixamento", min_value=1, max_value=max(1, len(teams) - 1), value=min(4, len(teams) - 1)
         )
-        home_advantage_regularization = st.slider(
-            "Regularização do mando médio", 0.0, 20.0, 5.0, 0.25,
-            help="Controla separadamente o efeito médio de jogar em casa no campeonato.",
+        automatic_tuning = st.checkbox(
+            "Selecionar parâmetros por backtest temporal",
+            value=True,
+            help="Treina somente em rodadas anteriores e escolhe a configuração com menor log loss.",
         )
-        home_regularization = float(
-            st.select_slider(
-                "Regularização do mando por clube",
-                options=[0, 1, 5, 10, 20, 50, 100, 200],
-                value=50,
-                help="Encolhe os desvios de mando dos clubes em direção ao mando médio.",
+        regularization = 5.0
+        home_advantage_regularization = 5.0
+        home_regularization = 200.0
+        decay_half_life = None
+        if not automatic_tuning:
+            regularization = st.slider(
+                "Regularização das forças", 0.0, 10.0, 5.0, 0.25,
+                help="Estabiliza estimativas; valores altos aproximam as forças dos clubes.",
             )
-        )
-        decay_half_life = st.selectbox(
-            "Decaimento temporal",
-            options=[None, 4.0, 6.0, 8.0, 12.0, 20.0, 38.0],
-            index=0,
-            format_func=lambda value: (
-                "Sem decaimento" if value is None else f"Meia-vida de {value:g} rodadas"
-            ),
-            help="Após a meia-vida escolhida, o peso de um jogo cai pela metade.",
-        )
-    seed = st.number_input("Semente aleatória", min_value=0, max_value=2_147_483_647, value=1970)
+            home_advantage_regularization = st.slider(
+                "Regularização do mando médio", 0.0, 20.0, 5.0, 0.25,
+                help="Controla separadamente o efeito médio de jogar em casa no campeonato.",
+            )
+            home_regularization = float(
+                st.select_slider(
+                    "Regularização do mando por clube",
+                    options=[0, 1, 5, 10, 20, 50, 100, 200],
+                    value=50,
+                    help="Encolhe os desvios de mando dos clubes em direção ao mando médio.",
+                )
+            )
+            decay_half_life = st.selectbox(
+                "Decaimento temporal",
+                options=[None, 4.0, 6.0, 8.0, 12.0, 20.0, 38.0],
+                index=0,
+                format_func=lambda value: (
+                    "Sem decaimento" if value is None else f"Meia-vida de {value:g} rodadas"
+                ),
+                help="Após a meia-vida escolhida, o peso de um jogo cai pela metade.",
+            )
+        seed = st.number_input("Semente aleatória", min_value=0, max_value=2_147_483_647, value=1970)
 
 observed, remaining = split_at_matchday(matches, cutoff)
-if is_demo:
-    st.warning("Modo demonstrativo: calendário e placares são inteiramente artificiais; não interprete os números como projeção real.")
 if observed.empty:
     st.warning("Nenhum jogo encerrado até o corte. As forças começam iguais e a incerteza estrutural é máxima.")
 
@@ -221,16 +203,21 @@ if not model.converged:
     st.error("O otimizador não convergiu. Não use os resultados sem revisar os dados e a regularização.")
 
 metric_1, metric_2, metric_3, metric_4 = st.columns(4)
-metric_1.metric("Jogos observados", len(observed))
-metric_2.metric("Jogos simulados por cenário", len(remaining))
-metric_3.metric("Mando (multiplicador)", f"{np.exp(model.home_advantage):.2f}×")
-metric_4.metric("Parâmetro de empate ν", f"{model.draw_parameter:.2f}")
+metric_1.metric("Rodada de corte", f"{cutoff} / {max_matchday}")
+metric_2.metric("Jogos observados", len(observed))
+metric_3.metric("Jogos a simular", len(remaining))
+metric_4.metric("Cenários simulados", f"{int(n_simulations):,}".replace(",", "."))
 
 tab_risk, tab_charts, tab_table, tab_model, tab_data = st.tabs(
-    ["Risco", "Distribuições", "Classificação no corte", "Modelo", "Dados"]
+    ["Radar da degola", "Projeção de pontos", "Classificação", "Como calculamos", "Dados da API"]
 )
 
 with tab_risk:
+    st.subheader("Na mira do fantasma")
+    st.caption(f"Os {min(4, len(teams))} maiores riscos no cenário selecionado. Probabilidades estimadas pelo modelo.")
+    render_risk_cards(simulation.summary, count=min(4, len(teams)))
+    st.subheader("O risco de cada clube")
+    st.caption("P05–P95: intervalo central de 90% das pontuações simuladas, condicionado ao modelo ajustado.")
     formatted = format_summary(simulation.summary)
     st.dataframe(
         formatted.style.format(
@@ -248,7 +235,7 @@ with tab_risk:
     st.download_button(
         "Baixar resumo CSV",
         formatted.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"risco_rebaixamento_{int(season)}_rodada_{cutoff}.csv",
+        file_name=f"risco_de_degola_{int(season)}_rodada_{cutoff}.csv",
         mime="text/csv",
     )
 
@@ -272,7 +259,7 @@ with tab_charts:
             title="Distribuição simulada da pontuação final",
         )
         histogram.update_layout(legend_title_text="Clube")
-        st.plotly_chart(histogram, width="stretch")
+        st.plotly_chart(style_chart(histogram), width="stretch")
     else:
         st.info("Selecione ao menos um clube para o histograma.")
 
@@ -287,7 +274,7 @@ with tab_charts:
         title="Incerteza da pontuação final por clube",
     )
     boxplot.update_layout(height=max(550, 27 * len(teams)))
-    st.plotly_chart(boxplot, width="stretch")
+    st.plotly_chart(style_chart(boxplot), width="stretch")
 
 with tab_table:
     current_table = standings_from_results(observed, teams)
@@ -298,6 +285,10 @@ with tab_table:
     )
 
 with tab_model:
+    st.write("As chances de queda são calculadas pelo modelo Bradley–Terry–Davidson e por simulações Monte Carlo, a partir dos jogos da API.")
+    model_metric_1, model_metric_2 = st.columns(2)
+    model_metric_1.metric("Mando (multiplicador)", f"{np.exp(model.home_advantage):.2f}×")
+    model_metric_2.metric("Parâmetro de empate ν", f"{model.draw_parameter:.2f}")
     st.subheader("Especificação")
     st.latex(r"P(H)=\frac{a}{a+b+\nu\sqrt{ab}},\quad P(E)=\frac{\nu\sqrt{ab}}{a+b+\nu\sqrt{ab}},\quad P(A)=\frac{b}{a+b+\nu\sqrt{ab}}")
     st.latex(r"a=\exp(\theta_H+h+\delta_H),\qquad b=\exp(\theta_A)")
@@ -383,5 +374,6 @@ with tab_data:
     )
 
 st.caption(
+    "Risco de degola · Dados: football-data.org. Projeções condicionadas ao modelo, sem garantia de resultado. "
     "Critérios simulados: pontos, vitórias, saldo de gols e gols pró. Empates residuais são sorteados, pois cartões e confronto direto não estão no endpoint gratuito."
 )
