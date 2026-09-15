@@ -51,4 +51,3 @@ def style_chart(figure):
     figure.update_xaxes(gridcolor="#23414A", zerolinecolor="#23414A")
     figure.update_yaxes(gridcolor="#23414A", zerolinecolor="#23414A")
     return figure
-

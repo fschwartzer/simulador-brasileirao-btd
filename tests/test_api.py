@@ -91,4 +91,3 @@ def test_missing_token_does_not_call_api(monkeypatch):
     with pytest.raises(FootballDataError, match="API_TOKEN"):
         fetch_brasileirao_matches(" ", 2026)
     request.assert_not_called()
-
